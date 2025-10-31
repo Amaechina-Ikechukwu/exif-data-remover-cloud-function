@@ -26,7 +26,6 @@ def analyze_image(bucket_name, file_path, metadata=None):
         return
 
     # 2. Extract user ID and public status from metadata
-    metadata = metadata or {}
     user_id = metadata.get('uid')
     is_public = str(metadata.get('public', 'false')).lower() == 'true'
 

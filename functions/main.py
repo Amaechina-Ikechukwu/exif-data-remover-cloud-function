@@ -15,7 +15,7 @@ if not firebase_admin._apps:
     firebase_admin.initialize_app()
 
 
-def process_image(bucket_name, file_path, content_type):
+def process_image(bucket_name, file_path, content_type, uid=None):
     """
     Downloads an image, removes its EXIF data, and saves it to a new location.
     """
@@ -32,23 +32,20 @@ def process_image(bucket_name, file_path, content_type):
         source_blob.download_to_filename(temp_local_path)
         print(f"Image downloaded to temporary file: {temp_local_path}")
 
-        # Read all data from the image first, then close the file.
+        # Open the image and remove EXIF data by saving it without the data.
         with Image.open(temp_local_path) as img:
-            img_data = list(img.getdata())
-            img_format = img.format
-            img_mode = img.mode
-            img_size = img.size
-
-        # Now that the file is closed, it's safe to overwrite it.
-        img_no_exif = Image.new(img_mode, img_size)
-        img_no_exif.putdata(img_data)
-        img_no_exif.save(temp_local_path, format=img_format)
+            # By not passing exif data to the save method, it's stripped.
+            img.save(temp_local_path, format=img.format)
         print("EXIF data removed successfully.")
 
         # Define a new destination path in the 'processed/' subfolder.
         file_name = os.path.basename(file_path)
         destination_path = f"processed/{file_name}"
         destination_blob = bucket.blob(destination_path)
+
+        # Set the UID in the metadata of the processed image.
+        if uid:
+            destination_blob.metadata = {"uid": uid}
 
         # Upload the sanitized image to the new path.
         destination_blob.upload_from_filename(
@@ -57,13 +54,30 @@ def process_image(bucket_name, file_path, content_type):
         )
         print(f"Sanitized image uploaded to '{destination_path}'.")
 
-        # Trigger the image analysis on the NEW file.
-        analyze_image(bucket_name, destination_path, source_blob.metadata)
-
     finally:
         # Clean up the temporary file.
         os.remove(temp_local_path)
         print(f"Cleaned up temporary file and finished processing.")
+
+
+
+
+@storage_fn.on_object_finalized(bucket=os.environ.get('GCLOUD_PROJECT') + '.appspot.com', memory=512, cpu=1, region='us-central1', timeout_sec=120)
+def analyze_processed_image(event: storage_fn.CloudEvent[storage_fn.StorageObjectData]):
+    """
+    Triggers when a processed file is uploaded to Storage, and runs the analysis.
+    """
+    bucket_name = event.data.bucket
+    file_path = event.data.name
+    metadata = event.data.metadata or {}
+
+    # 1. Exit if the file is not in the 'processed/' directory.
+    if 'processed/' not in file_path:
+        print(f"File '{file_path}' is not a processed image. Skipping.")
+        return
+
+    # 2. Pass the metadata to the analysis function.
+    analyze_image(bucket_name, file_path, metadata)
 
 
 @storage_fn.on_object_finalized()
@@ -76,6 +90,8 @@ def remove_exif_on_upload(event: storage_fn.CloudEvent[storage_fn.StorageObjectD
     bucket_name = event.data.bucket
     file_path = event.data.name
     content_type = event.data.content_type
+    metadata = event.data.metadata or {}
+    uid = metadata.get("uid")
 
     # 1. Exit if the file is not an image.
     if not content_type or not content_type.startswith("image/"):
@@ -87,7 +103,7 @@ def remove_exif_on_upload(event: storage_fn.CloudEvent[storage_fn.StorageObjectD
         print(f"File '{file_path}' is already processed. Skipping.")
         return
 
-    process_image(bucket_name, file_path, content_type)
+    process_image(bucket_name, file_path, content_type, uid)
 
 
 @scheduler_fn.on_schedule(schedule="every 24 hours")
@@ -119,6 +135,7 @@ def scan_unprocessed_images(event: scheduler_fn.ScheduledEvent) -> None:
             continue
 
         print(f"Found unprocessed image: {file_path}")
-        process_image(bucket.name, file_path, content_type)
+        uid = blob.metadata.get("uid") if blob.metadata else None
+        process_image(bucket.name, file_path, content_type, uid)
         
     print("Scheduled scan finished.")
