@@ -15,7 +15,7 @@ if not firebase_admin._apps:
     firebase_admin.initialize_app()
 
 
-def process_image(bucket_name, file_path, content_type, uid=None):
+def process_image(bucket_name, file_path, content_type, uid=None, public=None):
     """
     Downloads an image, removes its EXIF data, and saves it to a new location.
     """
@@ -43,9 +43,14 @@ def process_image(bucket_name, file_path, content_type, uid=None):
         destination_path = f"processed/{file_name}"
         destination_blob = bucket.blob(destination_path)
 
-        # Set the UID in the metadata of the processed image.
+        new_metadata = {}
         if uid:
-            destination_blob.metadata = {"uid": uid}
+            new_metadata["uid"] = uid
+        if public:
+            new_metadata["public"] = public
+
+        if new_metadata:
+            destination_blob.metadata = new_metadata
 
         # Upload the sanitized image to the new path.
         destination_blob.upload_from_filename(
@@ -92,6 +97,7 @@ def remove_exif_on_upload(event: storage_fn.CloudEvent[storage_fn.StorageObjectD
     content_type = event.data.content_type
     metadata = event.data.metadata or {}
     uid = metadata.get("uid")
+    public = metadata.get("public")
 
     # 1. Exit if the file is not an image.
     if not content_type or not content_type.startswith("image/"):
@@ -103,7 +109,7 @@ def remove_exif_on_upload(event: storage_fn.CloudEvent[storage_fn.StorageObjectD
         print(f"File '{file_path}' is already processed. Skipping.")
         return
 
-    process_image(bucket_name, file_path, content_type, uid)
+    process_image(bucket_name, file_path, content_type, uid, public)
 
 
 @scheduler_fn.on_schedule(schedule="every 24 hours")
@@ -136,6 +142,33 @@ def scan_unprocessed_images(event: scheduler_fn.ScheduledEvent) -> None:
 
         print(f"Found unprocessed image: {file_path}")
         uid = blob.metadata.get("uid") if blob.metadata else None
-        process_image(bucket.name, file_path, content_type, uid)
-        
+        public = blob.metadata.get("public") if blob.metadata else None
+        process_image(bucket.name, file_path, content_type, uid, public)
+                
     print("Scheduled scan finished.")
+
+
+@scheduler_fn.on_schedule(schedule="every 6 hours")
+def analyze_untagged_images(event: scheduler_fn.ScheduledEvent) -> None:
+    """
+    Scans the storage bucket for untagged images and triggers analysis.
+    """
+    print("Starting scheduled scan for untagged images.")
+    
+    bucket = storage.bucket()
+    
+    # List blobs in the 'processed/' directory
+    blobs = bucket.list_blobs(prefix='photos/')
+    
+    for blob in blobs:
+        # Reload the blob to get the latest metadata
+        blob.reload()
+        
+        # Check if the blob is an image and not already tagged
+        if blob.content_type and blob.content_type.startswith("image/"):
+            if not blob.metadata or blob.metadata.get('tagged') != 'true':
+                print(f"Found untagged image: {blob.name}")
+                analyze_image(bucket.name, blob.name, blob.metadata)
+                
+    print("Scheduled scan for untagged images finished.")
+        

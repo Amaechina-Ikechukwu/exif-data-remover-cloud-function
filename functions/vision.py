@@ -26,8 +26,8 @@ def analyze_image(bucket_name, file_path, metadata=None):
         return
 
     # 2. Extract user ID and public status from metadata
-    user_id = metadata.get('uid')
-    is_public = str(metadata.get('public', 'false')).lower() == 'true'
+    user_id = current_metadata.get('uid')
+    is_public = current_metadata.get('public')
 
     if not user_id:
         print(f"Could not find user ID in metadata for {file_path}. Skipping analysis.")
@@ -48,15 +48,21 @@ def analyze_image(bucket_name, file_path, metadata=None):
         if response.error.message:
             raise Exception(f"Vision API Error: {response.error.message}")
 
-        labels = [label.description for label in response.label_annotations]
-        print(f"Labels detected: {', '.join(labels)}")
+        labels = response.label_annotations
+        all_tags = [label.description for label in labels]
+        # Filter labels with a confidence of 80% or higher for 'categories'
+        categories = [label.description for label in labels if label.score >= 0.8]
+
+        print(f"All labels detected: {', '.join(all_tags)}")
+        print(f"Categories with >80% confidence: {', '.join(categories)}")
 
         # 5. Save image URL and tags to Realtime Database.
         user_db_path = f'users/{user_id}/images'
-            
+
         image_data = {
             'imageUrl': image_url,
-            'tags': labels,
+            'tags': all_tags,
+            'categories': categories,
             'createdAt': {".sv": "timestamp"},
             'filePath': file_path,
             'public': is_public,
@@ -75,11 +81,17 @@ def analyze_image(bucket_name, file_path, metadata=None):
             public_image_ref.set(image_data)
             print(f"Successfully saved tags to public database.")
 
-        # 6. Update metadata with the 'tagged' flag.
+        # 6. Update metadata with analysis flags.
         current_metadata['tagged'] = 'true'
+        current_metadata['processed'] = 'true'
+        current_metadata['uid'] = user_id
+        current_metadata['public'] = str(is_public).lower()
         blob.metadata = current_metadata
         blob.patch()
-        print(f"Metadata updated for '{file_path}' with 'tagged' flag.")
+        print(f"Metadata updated for '{file_path}' with analysis flags.")
 
     except Exception as e:
-        print(f"An error occurred during image analysis for '{file_path}': {e}")
+        if "No such object" in str(e):
+            print(f"Blob '{file_path}' not found during patch, likely updated by another process. Skipping.")
+        else:
+            print(f"An error occurred during image analysis for '{file_path}': {e}")
